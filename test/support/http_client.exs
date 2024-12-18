@@ -1,54 +1,77 @@
 defmodule Phoenix.Integration.HTTPClient do
-  @doc """
-  Performs HTTP Request and returns Response
+  @moduledoc """
+  Provides utility functions for making HTTP requests during integration tests.
+  """
 
-    * method - The http method, for example :get, :post, :put, etc
-    * url - The string url, for example "http://example.com"
-    * headers - The map of headers
-    * body - The optional string body. If the body is a map, it is converted
-      to a URI encoded string of parameters
+  @type method :: :get | :post | :put | :delete | :patch | :head | :options
+  @type url :: String.t()
+  @type headers :: map()
+  @type body :: binary() | map()
+
+  @doc """
+  Performs an HTTP request and returns a response.
+
+  ## Parameters
+    - `method` (atom): The HTTP method, e.g., `:get`, `:post`.
+    - `url` (string): The URL to request, e.g., `"http://example.com"`.
+    - `headers` (map): A map of headers.
+    - `body` (optional): The request body, which can be a string or a map.
 
   ## Examples
 
       iex> HTTPClient.request(:get, "http://127.0.0.1", %{})
-      {:ok, %Response{..})
+      {:ok, %{status: 200, headers: [...], body: "..."}}
 
-      iex> HTTPClient.request(:post, "http://127.0.0.1", %{}, param1: "val1")
-      {:ok, %Response{..})
+      iex> HTTPClient.request(:post, "http://127.0.0.1", %{}, %{param1: "val1"})
+      {:ok, %{status: 201, headers: [...], body: "..."}}
 
-      iex> HTTPClient.request(:get, "http://unknownhost", %{}, param1: "val1")
-      {:error, ...}
+      iex> HTTPClient.request(:get, "http://unknownhost", %{})
+      {:error, :nxdomain}
 
   """
+  @spec request(method, url, headers, body) :: {:ok, map()} | {:error, term()}
   def request(method, url, headers, body \\ "")
-  def request(method, url, headers, body) when is_map body do
+
+  def request(method, url, headers, body) when is_map(body) do
+    headers = Map.put_new(headers, "content-type", "application/x-www-form-urlencoded")
     request(method, url, headers, URI.encode_query(body))
   end
-  def request(method, url, headers, body) do
-    url     = String.to_charlist(url)
-    headers = headers |> Map.put_new("content-type", "text/html")
-    ct_type = headers["content-type"] |> String.to_charlist
 
-    header = Enum.map headers, fn {k, v} ->
-      {String.to_charlist(k), String.to_charlist(v)}
-    end
+  def request(method, url, headers, body) when is_binary(body) do
+    headers = normalize_headers(headers)
+    url = String.to_charlist(url)
 
-    # Generate a random profile per request to avoid reuse
-    profile = :crypto.strong_rand_bytes(4) |> Base.encode16 |> String.to_atom
+    profile = :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower) |> String.to_atom
     {:ok, pid} = :inets.start(:httpc, profile: profile)
 
-    resp =
+    request_opts = [body_format: :binary]
+
+    response =
       case method do
-        :get -> :httpc.request(:get, {url, header}, [], [body_format: :binary], pid)
-        _    -> :httpc.request(method, {url, header, ct_type, body}, [], [body_format: :binary], pid)
+        :get -> :httpc.request(:get, {url, headers}, [], request_opts, pid)
+        _ ->
+          content_type = Map.get(headers, "content-type", "text/plain") |> String.to_charlist()
+          :httpc.request(method, {url, headers, content_type, body}, [], request_opts, pid)
       end
 
     :inets.stop(:httpc, pid)
-    format_resp(resp)
+    format_response(response)
   end
 
-  defp format_resp({:ok, {{_http, status, _status_phrase}, headers, body}}) do
-    {:ok, %{status: status, headers: headers, body: body}}
+  defp normalize_headers(headers) do
+    headers
+    |> Enum.map(fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
   end
-  defp format_resp({:error, reason}), do: {:error, reason}
+
+  defp format_response({:ok, {{_http_version, status, _reason_phrase}, headers, body}}) do
+    {:ok, %{status: status, headers: parse_headers(headers), body: body}}
+  end
+
+  defp format_response({:error, reason}), do: {:error, reason}
+
+  defp parse_headers(headers) do
+    headers
+    |> Enum.map(fn {k, v} -> {String.downcase(to_string(k)), v} end)
+    |> Enum.into(%{})
+  end
 end
